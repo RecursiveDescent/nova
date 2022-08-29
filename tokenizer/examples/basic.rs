@@ -6,7 +6,13 @@ pub fn main() {
 
     loop {
         let token = stream.next();
-        println!("{:?}", token);
+
+		if (token.kind == TokenKind::Eof) {
+			break;
+		}
+		
+        println!("{:?} {:?}", token.kind, &input[token.start as usize .. stream.index as usize]);
+		
         if token.kind == TokenKind::Eof {
             break;
         }

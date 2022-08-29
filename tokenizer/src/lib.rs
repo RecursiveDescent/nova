@@ -27,6 +27,7 @@ pub enum TokenKind {
     Pipe,
     Or,
     Plus,
+	Increment,
     AddAssign,
     Minus,
     SubAssign,
@@ -43,9 +44,18 @@ pub enum TokenKind {
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct Token {
+pub struct Token<'a> {
     pub kind: TokenKind,
     pub start: u32,
+	pub line: u32,
+	pub column: u32,
+	pub value: &'a [u8]
+}
+
+impl<'a> Token<'a> {
+	pub fn to_string(&self) -> String {
+		return String::from_utf8_lossy(self.value).to_string();
+	}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,7 +97,9 @@ enum State {
 
 pub struct TokenStream<'a> {
     buffer: &'a [u8],
-    index: u32,
+    pub index: u32,
+	pub line: u32,
+	pub column: u32,
     len: u32,
 }
 
@@ -96,11 +108,43 @@ impl<'a> TokenStream<'a> {
         Self {
             buffer,
             index: 0,
+			line: 0,
+			column: 0,
             len: u32::try_from(buffer.len()).expect("[todo: better error]"),
         }
     }
 
-    pub fn next(&mut self) -> Token {
+	pub fn peek(&mut self) -> Token<'a> {
+		let index = self.index;
+
+		let line = self.line;
+
+		let column = self.column;
+
+		let token = self.next();
+
+		self.index = index;
+
+		self.line = line;
+
+		self.column = column;
+
+		return token;
+	}
+
+	pub fn skip_newline(&mut self) -> u16 {
+		let mut count = 0;
+
+		while self.peek().kind == TokenKind::JunkNewline {
+			self.next();
+
+			count += 1;
+		}
+
+		return count;
+	}
+
+    pub fn next(&mut self) -> Token<'a> {
         let start = self.index;
         let mut state: State = State::Init;
         let mut kind: TokenKind = TokenKind::Eof;
@@ -112,7 +156,10 @@ impl<'a> TokenStream<'a> {
             } else {
                 0
             };
+			
             self.index += 1;
+
+			self.column += 1;
 
             use State::*;
             use TokenKind::*;
@@ -132,6 +179,12 @@ impl<'a> TokenStream<'a> {
                     b'\n' => {
                         kind = TokenKind::JunkNewline;
                         state = State::JunkNewline;
+
+						self.line += 1;
+
+						self.column = 1;
+
+						break;
                     }
                     b'{' => {
                         kind = LBrace;
@@ -186,8 +239,7 @@ impl<'a> TokenStream<'a> {
                         state = State::Equal;
                     }
                     b' ' | b'\r' | b'\t' => {
-                        kind = TokenKind::Junk;
-                        state = State::Junk;
+                        continue;
                     }
                     0 => break,
                     _ => {
@@ -207,7 +259,7 @@ impl<'a> TokenStream<'a> {
                                 if !cp.is_id_continue() {
                                     break;
                                 }
-                                self.index += offset as u32;
+                                self.index += offset as u32 - 1;
                             }
 
                             kind = Ident;
@@ -247,16 +299,31 @@ impl<'a> TokenStream<'a> {
                         self.index -= 1;
                         TokenKind::Div
                     };
+					
                     break;
                 }
-                State::Plus => {
-                    kind = if c == b'=' {
-                        AddAssign
-                    } else {
+                State::Plus => match c {
+                    b'=' => {
+                        kind = TokenKind::AddAssign;
+
+						break;
+                    }
+
+					b'+' => {
+						kind = TokenKind::Increment;
+
+						break;
+					}
+
+					0 => break,
+
+					_ => {
                         self.index -= 1;
-                        TokenKind::Plus
-                    };
-                    break;
+                        
+						kind = TokenKind::Plus;
+
+						break;
+                    }
                 }
                 State::Minus => {
                     kind = if c == b'=' {
@@ -274,6 +341,7 @@ impl<'a> TokenStream<'a> {
                         self.index -= 1;
                         TokenKind::LAngle
                     };
+					
                     break;
                 }
                 State::RAngle => {
@@ -283,6 +351,7 @@ impl<'a> TokenStream<'a> {
                         self.index -= 1;
                         TokenKind::RAngle
                     };
+					
                     break;
                 }
                 State::Amp => match c {
@@ -311,13 +380,26 @@ impl<'a> TokenStream<'a> {
                     b'\n' => state = State::JunkNewline,
                     b' ' | b'\r' | b'\t' => {}
                     b'/' => state = JunkSlash,
+					0 => {
+						kind = TokenKind::Eof;
+
+						break;
+					}
                     _ => {
+						state = State::Init;
+						
                         self.index -= 1;
-                        break;
+						
+                        continue;
                     }
                 },
                 State::JunkNewline => match c {
-                    b' ' | b'\t' | b'\n' | b'\r' => {}
+                    b' ' | b'\t' | b'\r' => {}
+					b'\n' => {
+						self.line += 1;
+
+						self.column = 1;
+					}
                     b'/' => state = JunkNewlineSlash,
                     _ => {
                         self.index -= 1;
@@ -482,6 +564,6 @@ impl<'a> TokenStream<'a> {
             }
         }
 
-        Token { start, kind }
+        return Token { start, kind, value: if self.index >= self.len { "".as_bytes() } else { &self.buffer[start as usize .. self.index as usize] }, line: self.line, column: self.column };
     }
 }
