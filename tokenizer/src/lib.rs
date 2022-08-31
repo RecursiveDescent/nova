@@ -9,8 +9,6 @@ pub enum TokenKind {
     HexLit,
     BinLit,
     NumLit,
-    Junk,
-    JunkNewline,
     InvalidNonTerminatedComment,
     InvalidNewlineString,
     LParen,
@@ -30,6 +28,7 @@ pub enum TokenKind {
 	Increment,
     AddAssign,
     Minus,
+	Decrement,
     SubAssign,
     Div,
     DivAssign,
@@ -45,14 +44,20 @@ pub enum TokenKind {
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct Token<'a> {
+	pub index: u32,
+	pub end_index: u32,
     pub kind: TokenKind,
-    pub start: u32,
 	pub line: u32,
 	pub column: u32,
-	pub value: &'a [u8]
+	pub value: &'a [u8],
+	pub after_line: bool
 }
 
 impl<'a> Token<'a> {
+	pub fn new(kind: TokenKind, index: u32, line: u32, column: u32, value: &'a [u8], after_line: bool) -> Token<'a> {
+		return Token { index, end_index: index + value.len() as u32, kind, value, line, column, after_line };
+	}
+	
 	pub fn to_string(&self) -> String {
 		return String::from_utf8_lossy(self.value).to_string();
 	}
@@ -82,8 +87,7 @@ enum State {
     RAngle,
     LAngle,
 
-    Junk,
-    JunkNewline,
+	Junk,
 
     JunkSlash,
     JunkNewlineSlash,
@@ -101,6 +105,7 @@ pub struct TokenStream<'a> {
 	pub line: u32,
 	pub column: u32,
     len: u32,
+	after_line: bool
 }
 
 impl<'a> TokenStream<'a> {
@@ -108,11 +113,58 @@ impl<'a> TokenStream<'a> {
         Self {
             buffer,
             index: 0,
-			line: 0,
-			column: 0,
+			line: 1,
+			column: 1,
             len: u32::try_from(buffer.len()).expect("[todo: better error]"),
+			after_line: false
         }
     }
+
+	pub fn line(&self, token: Token) -> String {
+		let mut ln = String::new();
+
+		let mut index = token.index;
+
+		loop {
+			if self.buffer[index as usize] == b'\n' {
+				index += 1;
+				
+				break;
+			}
+
+			if index == 0 {
+				break;
+			}
+
+			index -= 1;
+		}
+
+		while index < self.len && self.buffer[index as usize] != b'\n' {
+			ln += &(self.buffer[index as usize] as char).to_string();
+
+			index += 1;
+		}
+
+		return ln;
+	}
+
+	pub fn current_line(&self) -> String {
+		let mut ln = String::new();
+
+		let mut index = self.index;
+
+		while self.buffer[index as usize] != b'\n' && index > 0 {
+			index -= 1;
+		}
+
+		while index < self.len && self.buffer[index as usize] != b'\n' {
+			ln += &(self.buffer[index as usize] as char).to_string();
+
+			index += 1;
+		}
+
+		return ln;
+	}
 
 	pub fn peek(&mut self) -> Token<'a> {
 		let index = self.index;
@@ -132,438 +184,148 @@ impl<'a> TokenStream<'a> {
 		return token;
 	}
 
-	pub fn skip_newline(&mut self) -> u16 {
-		let mut count = 0;
-
-		while self.peek().kind == TokenKind::JunkNewline {
-			self.next();
-
-			count += 1;
+	pub fn get(&mut self) -> u8 {
+		if self.index >= self.len {
+			return 0;
 		}
 
-		return count;
+		self.column += 1;
+		
+		let c = self.buffer[self.index as usize];
+
+		if c == b'\n' {
+			self.column = 1;
+
+			self.line += 1;
+		}
+
+		self.index += 1;
+
+		return c;
+	}
+
+	pub fn peekc(&mut self) -> u8 {
+		if self.index >= self.len {
+			return 0;
+		}
+		
+		return self.buffer[self.index as usize];
+	}
+
+	pub fn skip_whitespace(&mut self) {
+		loop {
+			match self.peekc() {
+				b' ' | b'\r' | b'\t' => {
+					self.get();
+				}
+
+				b'\n' => {
+					self.after_line = true;
+
+					self.get();
+				}
+
+				_ => {
+					break;
+				}
+			}
+		}
 	}
 
     pub fn next(&mut self) -> Token<'a> {
-        let start = self.index;
-        let mut state: State = State::Init;
-        let mut kind: TokenKind = TokenKind::Eof;
+		self.skip_whitespace();
 
-        loop {
-            let c = if self.index < self.len {
-                // TODO: find way to avoid upcast on 64bit machines
-                self.buffer[self.index as usize]
-            } else {
-                0
-            };
-			
-            self.index += 1;
+		let mut c = self.peekc();
 
-			self.column += 1;
+		let mut start = self.index;
 
-            use State::*;
-            use TokenKind::*;
+		let line = self.line;
 
-            match state {
-                Init => match c {
-                    b'\'' => {
-                        state = StringSingleContinue;
-                        kind = String;
-                    }
-                    b'"' => {
-                        state = StringDoubleContinue;
-                        kind = String;
-                    }
-                    b'0' => state = Zero,
-                    b'1'..=b'9' => state = NumContinue,
-                    b'\n' => {
-                        kind = TokenKind::JunkNewline;
-                        state = State::JunkNewline;
+		let column = self.column;
 
-						self.line += 1;
+		let after_line = self.after_line;
 
-						self.column = 1;
+		self.after_line = false;
 
-						break;
-                    }
-                    b'{' => {
-                        kind = LBrace;
-                        break;
-                    }
-                    b'}' => {
-                        kind = RBrace;
-                        break;
-                    }
-                    b'(' => {
-                        kind = LParen;
-                        break;
-                    }
-                    b')' => {
-                        kind = RParen;
-                        break;
-                    }
-                    b'<' => {
-                        state = State::LAngle;
-                    }
-                    b'>' => {
-                        state = State::RAngle;
-                    }
-                    b'!' => {
-                        kind = Bang;
-                        break;
-                    }
-                    b'^' => {
-                        kind = Caret;
-                        break;
-                    }
-                    b'*' => {
-                        kind = Asterisk;
-                        break;
-                    }
-                    b'&' => {
-                        state = State::Amp;
-                    }
-                    b'|' => {
-                        state = State::Pipe;
-                    }
-                    b'+' => {
-                        state = State::Plus;
-                    }
-                    b'-' => {
-                        state = State::Minus;
-                    }
-                    b'/' => {
-                        state = State::FwdSlash;
-                    }
-                    b'=' => {
-                        state = State::Equal;
-                    }
-                    b' ' | b'\r' | b'\t' => {
-                        continue;
-                    }
-                    0 => break,
-                    _ => {
-                        self.index -= 1;
-                        let mut chars = unsafe {
-                            std::str::from_utf8_unchecked(&self.buffer[self.index as usize..])
-                        }
-                        .char_indices();
+		if c == 0 {
+			return Token::new(TokenKind::Eof, start, line, column, "".as_bytes(), after_line); 
+		}
 
-                        // we know there's at least one
-                        let (offset0, cp0) = chars.next().unwrap();
+		match c {
+			b'+' => {
+				self.get();
 
-                        if cp0.is_id_start() {
-                            self.index += offset0 as u32 + 1;
-
-                            for (offset, cp) in chars {
-                                if !cp.is_id_continue() {
-                                    break;
-                                }
-                                self.index += offset as u32 - 1;
-                            }
-
-                            kind = Ident;
-                            break;
-                        }
-
-                        panic!("Unknown character '{}'.", char::from(c));
-                    }
-                },
-                State::Equal => match c {
-                    b'=' => state = State::EqualEqual,
-                    b'>' => {
-                        kind = TokenKind::FatArrow;
-                        break;
-                    }
-                    _ => {
-                        kind = TokenKind::Equal;
-                        self.index -= 1;
-                        break;
-                    }
-                },
-                State::EqualEqual => match c {
-                    b'=' => {
-                        kind = EqualEqualEqual;
-                        break;
-                    }
-                    _ => {
-                        kind = TokenKind::EqualEqual;
-                        self.index -= 1;
-                        break;
-                    }
-                },
-                State::FwdSlash => {
-                    kind = if c == b'=' {
-                        DivAssign
-                    } else {
-                        self.index -= 1;
-                        TokenKind::Div
-                    };
-					
-                    break;
-                }
-                State::Plus => match c {
-                    b'=' => {
-                        kind = TokenKind::AddAssign;
-
-						break;
-                    }
-
+				match self.peekc() {
 					b'+' => {
-						kind = TokenKind::Increment;
-
-						break;
+						self.get();
+			
+						return Token::new(TokenKind::Increment, start, line, column, &self.buffer[start as usize .. self.index as usize], after_line);
 					}
 
-					0 => break,
+					_ => {}
+				}
+			
+				return Token::new(TokenKind::Plus, start, line, column, &self.buffer[start as usize .. self.index as usize], after_line);
+			}
 
-					_ => {
-                        self.index -= 1;
-                        
-						kind = TokenKind::Plus;
+			b'-' => {
+				self.get();
 
-						break;
-                    }
-                }
-                State::Minus => {
-                    kind = if c == b'=' {
-                        SubAssign
-                    } else {
-                        self.index -= 1;
-                        TokenKind::Minus
-                    };
-                    break;
-                }
-                State::LAngle => {
-                    kind = if c == b'=' {
-                        LessOrEqual
-                    } else {
-                        self.index -= 1;
-                        TokenKind::LAngle
-                    };
-					
-                    break;
-                }
-                State::RAngle => {
-                    kind = if c == b'=' {
-                        GreaterOrEqual
-                    } else {
-                        self.index -= 1;
-                        TokenKind::RAngle
-                    };
-					
-                    break;
-                }
-                State::Amp => match c {
-                    b'&' => {
-                        kind = And;
-                        break;
-                    }
-                    _ => {
-                        kind = TokenKind::Amp;
-                        self.index -= 1;
-                        break;
-                    }
-                },
-                State::Pipe => match c {
-                    b'|' => {
-                        kind = Or;
-                        break;
-                    }
-                    _ => {
-                        kind = TokenKind::Pipe;
-                        self.index -= 1;
-                        break;
-                    }
-                },
-                State::Junk => match c {
-                    b'\n' => state = State::JunkNewline,
-                    b' ' | b'\r' | b'\t' => {}
-                    b'/' => state = JunkSlash,
-					0 => {
-						kind = TokenKind::Eof;
-
-						break;
+				match self.peekc() {
+					b'-' => {
+						self.get();
+			
+						return Token::new(TokenKind::Decrement, start, line, column, &self.buffer[start as usize .. self.index as usize], after_line);
 					}
-                    _ => {
-						state = State::Init;
-						
-                        self.index -= 1;
-						
-                        continue;
-                    }
-                },
-                State::JunkNewline => match c {
-                    b' ' | b'\t' | b'\r' => {}
-					b'\n' => {
-						self.line += 1;
 
-						self.column = 1;
-					}
-                    b'/' => state = JunkNewlineSlash,
-                    _ => {
-                        self.index -= 1;
-                        break;
-                    }
-                },
-                JunkSlash => match c {
-                    b'*' => state = JunkCommentContinue,
-                    _ => {
-                        self.index -= 2;
-                        break;
-                    }
-                },
-                JunkNewlineSlash => match c {
-                    b'*' => state = JunkNewlineCommentContinue,
-                    _ => {
-                        self.index -= 2;
-                        break;
-                    }
-                },
-                JunkCommentContinue => match c {
-                    b'*' => state = JunkCommentAsterisk,
-                    b'\n' => {
-                        state = JunkNewlineCommentContinue;
-                        kind = TokenKind::JunkNewline;
-                    }
-                    0 => {
-                        kind = InvalidNonTerminatedComment;
-                        break;
-                    }
-                    _ => {}
-                },
-                JunkNewlineCommentContinue => match c {
-                    b'*' => state = JunkCommentAsterisk,
-                    0 => {
-                        kind = InvalidNonTerminatedComment;
-                        break;
-                    }
-                    _ => {}
-                },
-                JunkCommentAsterisk => match c {
-                    b'/' => {
-                        state = State::Junk;
-                    }
-                    0 => {
-                        kind = InvalidNonTerminatedComment;
-                        break;
-                    }
-                    _ => {
-                        self.index -= 2;
-                        break;
-                    }
-                },
-                JunkNewlineCommentAsterisk => match c {
-                    b'/' => {
-                        state = State::JunkNewline;
-                    }
-                    0 => {
-                        kind = InvalidNonTerminatedComment;
-                        break;
-                    }
-                    _ => {
-                        self.index -= 2;
-                        break;
-                    }
-                },
-                StringSingleContinue => match c {
-                    b'\\' => state = StringSingleEscape,
-                    b'\'' => break,
-                    b'\n' => kind = InvalidNewlineString,
-                    0 => {
-                        kind = NonTerminatedString;
-                        break;
-                    }
-                    _ => {}
-                },
-                StringSingleEscape => match c {
-                    0 => {
-                        kind = NonTerminatedString;
-                        break;
-                    }
-                    // TODO: make an actual validator
-                    _ => state = StringSingleContinue,
-                },
-                StringDoubleContinue => match c {
-                    b'\\' => state = StringDoubleEscape,
-                    b'"' => break,
-                    b'\n' => kind = InvalidNewlineString,
-                    0 => {
-                        kind = NonTerminatedString;
-                        break;
-                    }
-                    _ => {}
-                },
-                StringDoubleEscape => match c {
-                    0 => {
-                        kind = NonTerminatedString;
-                        break;
-                    }
-                    // TODO: make an actual validator
-                    _ => state = StringDoubleContinue,
-                },
-                Zero => match c {
-                    b'B' | b'b' => state = BinContinue,
-                    b'X' | b'x' | b'0' => state = HexContinue,
-                    0 => {
-                        kind = NumLit;
-                        self.index -= 1;
-                        break;
-                    }
-                    _ => {}
-                },
-                BinContinue => match c {
-                    b'0' | b'1' => {}
-                    b'_' => todo!("Underscore literal support."),
-                    _ => {
-                        kind = BinLit;
-                        self.index -= 1;
-                        break;
-                    }
-                },
-                HexContinue => match c {
-                    b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f' => {}
-                    b'_' => todo!("Underscore literal support."),
-                    _ => {
-                        kind = HexLit;
-                        self.index -= 1;
-                        break;
-                    }
-                },
-                NumContinue => match c {
-                    b'0'..=b'9' => {}
-                    b'_' => todo!("Underscore literal support."),
-                    b'e' => state = NumExpContinue,
-                    b'.' => state = NumFloatContinue,
-                    _ => {
-                        kind = NumLit;
-                        self.index -= 1;
-                        break;
-                    }
-                },
-                NumExpContinue => match c {
-                    b'0'..=b'9' => {}
-                    b'_' => todo!("Underscore literal support."),
-                    _ => {
-                        kind = NumLit;
-                        self.index -= 1;
-                        break;
-                    }
-                },
-                NumFloatContinue => match c {
-                    b'0'..=b'9' => {}
-                    b'_' => todo!("Underscore literal support."),
-                    b'e' => state = NumExpContinue,
-                    b'.' => state = NumFloatContinue,
-                    _ => {
-                        kind = NumLit;
-                        self.index -= 1;
-                        break;
-                    }
-                },
-            }
-        }
+					_ => {}
+				}
+			
+				return Token::new(TokenKind::Minus, start, line, column, &self.buffer[start as usize .. self.index as usize], after_line);
+			}
 
-        return Token { start, kind, value: if self.index >= self.len { "".as_bytes() } else { &self.buffer[start as usize .. self.index as usize] }, line: self.line, column: self.column };
+			_ => {}
+		}
+
+		if c == b'"' || c == b'\'' {
+			self.get();
+
+			start = self.index;
+
+			let mut next: u8 = self.peekc();
+
+			while next != c {
+				next = self.get();
+				
+				if next == 0 {
+					// TODO: Better error messages.
+					panic!("Unexpected EOF");
+				}
+			}
+
+			return Token::new(TokenKind::String, start, line, column, &self.buffer[start as usize .. self.index as usize - 1], after_line);
+		}
+
+		if c >= b'0' && c <= b'9' {
+			self.get();
+			
+			c = self.peekc();
+			
+			while c >= b'0' && c <= b'9' {
+				c = self.get();
+			}
+
+			return Token::new(TokenKind::NumLit, start, line, column, &self.buffer[start as usize .. self.index as usize], after_line);
+		}
+
+		if c.is_ascii_alphabetic() {
+			self.get();
+			
+			while self.peekc().is_ascii_alphanumeric() {
+				self.get();
+			}
+		}
+
+		return Token::new(TokenKind::Ident, start, line, column, &self.buffer[start as usize .. self.index as usize], after_line);
     }
 }
