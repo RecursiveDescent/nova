@@ -104,7 +104,7 @@ pub struct TokenStream<'a> {
     pub index: u32,
 	pub line: u32,
 	pub column: u32,
-    len: u32,
+    pub len: u32,
 	after_line: bool
 }
 
@@ -125,14 +125,18 @@ impl<'a> TokenStream<'a> {
 
 		let mut index = token.index;
 
+		if index == self.len {
+			index -= 1;
+		}
+
 		loop {
-			if self.buffer[index as usize] == b'\n' {
-				index += 1;
-				
+			if index == 0 {
 				break;
 			}
-
-			if index == 0 {
+			
+			if self.buffer[index as usize] == b'\n'  {
+				index += 1;
+				
 				break;
 			}
 
@@ -152,6 +156,10 @@ impl<'a> TokenStream<'a> {
 		let mut ln = String::new();
 
 		let mut index = self.index;
+
+		if index == self.len {
+			index -= 1;
+		}
 
 		while self.buffer[index as usize] != b'\n' && index > 0 {
 			index -= 1;
@@ -282,6 +290,18 @@ impl<'a> TokenStream<'a> {
 				}
 			
 				return Token::new(TokenKind::Minus, start, line, column, &self.buffer[start as usize .. self.index as usize], after_line);
+			}
+
+			b'(' => {
+				self.get();
+			
+				return Token::new(TokenKind::LParen, start, line, column, &self.buffer[start as usize .. self.index as usize], after_line);
+			}
+
+			b')' => {
+				self.get();
+			
+				return Token::new(TokenKind::RParen, start, line, column, &self.buffer[start as usize .. self.index as usize], after_line);
 			}
 
 			_ => {}

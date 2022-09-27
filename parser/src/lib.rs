@@ -17,6 +17,8 @@ pub enum ExprKind {
 pub mod Color {
 	pub const Red: &str = "\x1b[31m";
 
+	pub const Green: &str = "\x1b[32m";
+
 	pub const Yellow: &str = "\x1b[33m";
 
 	pub const Blue: &str = "\x1b[34m";
@@ -83,10 +85,40 @@ impl<'a> Expr<'a> {
 			value: None
 		};
 	}
+
+	pub fn last_token(expr: &Expr<'a>) -> Token<'a> {
+		match expr.kind {
+			ExprKind::Add => {
+				return Expr::last_token(&expr.data[1]);
+			}
+
+			ExprKind::PreDecrement | ExprKind::PostDecrement | ExprKind::PreIncrement | ExprKind::PostIncrement => {
+				return Expr::last_token(expr.expr.as_ref().unwrap());
+			}
+
+			ExprKind::Literal => {
+				return expr.value.unwrap();
+			}
+
+			ExprKind::Group => {
+				return Expr::last_token(expr.expr.as_ref().unwrap());
+			}
+
+			_ => { panic!("{:?}", expr.kind); }
+		}
+	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum HintKind {
+	Add,
+	Remove
+}
+
+#[derive(Debug, Clone)]
 pub struct Hint<'a> {
+	pub kind: HintKind,
+	
 	pub targets: Vec<Token<'a>>,
 
 	pub column: u32,
@@ -95,18 +127,42 @@ pub struct Hint<'a> {
 }
 
 impl<'a> Hint<'a> {
-	pub fn new(target: Token<'a>, help: String) -> Hint<'a> {
-		return Hint { targets: vec![target], column: target.column, help };
+	pub fn new(kind: HintKind, targets: Vec<Token<'a>>, help: String) -> Hint<'a> {
+		if targets.len() == 0 {
+			panic!("targets");
+		}
+
+		let first = targets[0];
+		
+		return Hint { kind, targets, column: first.column, help };
+	}
+
+	pub fn end(&self) -> u32 {
+		if self.targets.len() == 1 {
+			return self.targets[0].column + self.targets[0].value.len() as u32;
+		}
+
+		return 0;
 	}
 	
 	pub fn show(&self, stream: &TokenStream) {
+		if self.kind == HintKind::Remove {
+			self.underline_tokens(stream, Color::Red);
+
+			return;
+		}
+		
 		let mut ptr = String::new();
 
-		for _i in [1..self.column] {
+		for _i in 1..self.column {
 			ptr += &" ";
 		}
 
 		ptr += &"^";
+
+		if self.kind == HintKind::Add {
+			ptr = format!("{}{}{}", Color::Green, ptr, Color::Reset);
+		}
 
 		println!("{}\n{}\n{}", stream.line(self.targets[0]), ptr, self.help);
 	}
@@ -142,7 +198,7 @@ impl<'a> Hint<'a> {
 
 		let linecol = format!("{}:{}: ", self.targets[0].line, self.targets[0].column);
 
-		for _i in 1..self.column + linecol.len() as u32 {
+		for _i in 1..self.column {
 			ptr += &" ";
 		}
 
@@ -156,20 +212,70 @@ impl<'a> Hint<'a> {
 
 		ptr = format!("{}{}{}", color, ptr, Color::Reset);
 
-		println!("{}{}{}{}\n{}\n{}", Color::Yellow, linecol, Color::Reset, stream.line(self.targets[0]), ptr, self.help);
+		println!("{}\n{}\n{}", stream.line(self.targets[0]), ptr, self.help);
 	}
 }
 
 #[derive(Debug)]
 pub struct SyntaxError<'a> {
+	pub subject: Token<'a>,
+	
 	pub message: &'a str,
 
-	pub hints: Vec<Hint<'a>> 
+	pub hints: Vec<Hint<'a>>
 }
 
 impl<'a> SyntaxError<'a> {
-	pub fn new(message: &'a str) -> SyntaxError<'a> {
-		return SyntaxError { message, hints: vec![] };
+	pub fn new(stream: &TokenStream, subject: Token<'a>, message: &'a str) -> SyntaxError<'a> {
+		let mut error = SyntaxError { subject, message, hints: vec![] };
+
+		return error;
+	}
+
+	pub fn underline(&mut self, stream: &TokenStream, from: u32, to: u32, color: &str) {
+		let mut ptr = String::new();
+
+		for _i in 1..from {
+			ptr += &" ";
+		}
+
+		ptr += &"^";
+
+		for _i in from..to {
+			ptr += &"~";
+		}
+
+		println!("{}{}{}", color, ptr, Color::Reset);
+	}
+
+	pub fn show(&mut self, stream: &TokenStream<'a>) {
+		println!("{}{}:{}{}: {}\n", Color::Yellow, self.subject.line, self.subject.column, Color::Reset, self.message);
+
+		// self.hints[0].show(stream);
+
+		let mut help: Vec<String> = Vec::new();
+
+		println!("{}", stream.line(self.subject));
+
+		for hint in self.hints.clone() {
+			help.push(hint.help.clone());
+			
+			match hint.kind {
+				HintKind::Add => {
+					self.underline(stream, hint.column, hint.end() - 1, Color::Green);
+				}
+
+				HintKind::Remove => {
+					self.underline(stream, hint.column, hint.end() - 1, Color::Red);
+				}
+
+				_ => {}
+			}
+		}
+
+		for help in help {
+			println!("{}", help);
+		}
 	}
 }
 
@@ -182,20 +288,32 @@ impl<'a> Parser<'a> {
 		return Parser { stream: stream };
 	}
 
-	pub fn expr(&mut self) -> Result<Expr<'a>, SyntaxError> {
-		let expr = self.unary().unwrap();
+	pub fn expr(&mut self) -> Result<Expr<'a>, SyntaxError<'a>> {
+		let expr = self.unary();
+
+		if expr.is_err() {
+			return expr;
+		}
 		
-		return self.expr_prec(expr);
+		return self.expr_prec(expr.unwrap());
 	}
 
 	// TODO: Add other operators and precedences.
-	pub fn expr_prec(&mut self, lhs: Expr<'a>) -> Result<Expr<'a>, SyntaxError> {
+	pub fn expr_prec(&mut self, lhs: Expr<'a>) -> Result<Expr<'a>, SyntaxError<'a>> {
 		let mut left = lhs;
 
 		while self.stream.peek().kind == TokenKind::Plus {
 			self.stream.next();
 
-			let mut right = self.unary().unwrap();
+			let mut right = match self.unary() {
+				Ok(expr) => {
+					expr
+				}
+				
+				Err(error) => {
+					return Err(error); 
+				}
+			};
 
 			if self.stream.peek().kind == TokenKind::Plus {
 				self.stream.next();
@@ -227,7 +345,7 @@ impl<'a> Parser<'a> {
 		return Ok(left);
 	}
 
-	pub fn unary(&mut self) -> Result<Expr<'a>, SyntaxError> {
+	pub fn unary(&mut self) -> Result<Expr<'a>, SyntaxError<'a>> {
 		let peek = self.stream.peek();
 			
 		if peek.kind == TokenKind::Minus {
@@ -239,7 +357,7 @@ impl<'a> Parser<'a> {
 		return self.prefix();
 	}
 
-	pub fn prefix(&mut self) -> Result<Expr<'a>, SyntaxError> {
+	pub fn prefix(&mut self) -> Result<Expr<'a>, SyntaxError<'a>> {
 		let peek = self.stream.peek();
 
 		if peek.kind == TokenKind::Increment || peek.kind == TokenKind::Decrement {
@@ -252,9 +370,13 @@ impl<'a> Parser<'a> {
 			if self.stream.peek().kind == TokenKind::Increment || self.stream.peek().kind == TokenKind::Decrement {
 				// println!("[{}{}{}{}{}] is invalid syntax", Color::Red, peek.to_string(), target.value.unwrap().to_string(), self.stream.peek().to_string(), Color::Reset);
 
-				let mut error = SyntaxError::new("Invalid syntax.");
+				let next = self.stream.peek();
 
-				error.hints.push(Hint::new(self.stream.peek(), format!("{0}help:{1} remove operator", Color::Blue, Color::Reset)));
+				let mut error = SyntaxError::new(&self.stream, next, "Invalid syntax.");
+
+				error.hints.push(Hint::new(HintKind::Remove, vec![self.stream.peek()], format!("{0}help:{1} remove operator", Color::Blue, Color::Reset)));
+
+				self.stream.next();
 				
 				return Err(error);
 			}
@@ -267,8 +389,16 @@ impl<'a> Parser<'a> {
 		return self.postfix();
 	}
 
-	pub fn postfix(&mut self) -> Result<Expr<'a>, SyntaxError> {
-		let expr = self.literal().unwrap();
+	pub fn postfix(&mut self) -> Result<Expr<'a>, SyntaxError<'a>> {
+		let expr = match self.literal() {
+			Ok(expr) => {
+				expr
+			}
+			
+			Err(error) => {
+				return Err(error); 
+			}
+		};
 
 		let peek = self.stream.peek();
 
@@ -283,14 +413,28 @@ impl<'a> Parser<'a> {
 		return Ok(expr);
 	}
 
-	pub fn literal(&mut self) -> Result<Expr<'a>, SyntaxError> {
+	pub fn literal(&mut self) -> Result<Expr<'a>, SyntaxError<'a>> {
 		let next = self.stream.next();
 
 		if next.kind == TokenKind::LParen {
-			let expr = self.unary().unwrap();
+			let expr = match self.expr() {
+				Ok(expr) => {
+					expr
+				}
+				
+				Err(error) => {
+					return Err(error); 
+				}
+			};
 
 			if self.stream.next().kind != TokenKind::RParen {
-				panic!("Expected )");
+				let last = Expr::last_token(&expr);
+				
+				let mut error = SyntaxError::new(&self.stream, last, "Unclosed parenthesis after expression.");
+
+				error.hints.push(Hint::new(HintKind::Add, vec![last], format!("{0}help:{1} add ) after expression", Color::Blue, Color::Reset)));
+
+				return Err(error);
 			}
 
 			return Ok(Expr::group(expr));

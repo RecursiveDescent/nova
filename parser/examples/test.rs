@@ -12,7 +12,7 @@ pub fn visualize(expr: &Expr, indent: u32) -> String {
 
 	match expr.kind {
 		ExprKind::Add => {
-			value += &"(".to_string();
+			value += &"[".to_string();
 		
 			value += &visualize(expr.data.get(0).unwrap(), indent);
 	
@@ -20,7 +20,7 @@ pub fn visualize(expr: &Expr, indent: u32) -> String {
 	
 			value += &visualize(expr.data.get(1).unwrap(), indent);
 	
-			value += &")".to_string();
+			value += &"]".to_string();
 	
 			return value;
 		}
@@ -44,17 +44,27 @@ pub fn visualize(expr: &Expr, indent: u32) -> String {
 		ExprKind::PreDecrement => {
 			 value += &"--".to_string();
 		
-			value += &visualize(expr.expr.as_ref().unwrap().as_ref(), indent);
+			value += &visualize(expr.expr.as_ref().unwrap(), indent);
 	
 			return value;
 		 }
 
 		ExprKind::PostDecrement => {
-			value += &visualize(expr.expr.as_ref().unwrap().as_ref(), indent);
+			value += &visualize(expr.expr.as_ref().unwrap(), indent);
 
 			value += &"--".to_string();
 	
 			return value;
+		}
+
+		ExprKind::Group => {
+			value += &"(".to_string();
+		
+			value += &visualize(expr.expr.as_ref().unwrap(), indent);
+	
+			value += &")".to_string();
+	
+			return value; 
 		}
 
 		_ => {}
@@ -64,17 +74,17 @@ pub fn visualize(expr: &Expr, indent: u32) -> String {
 }
 
 pub fn main() {
-    let input = "++err-- + 2";
+    let input = "(1 + ++2++";
 
 	let mut stream = TokenStream::new(input.as_bytes());
 	
 	let mut parser = Parser::new(stream);
 
-	let add = parser.expr();
+	let mut add = parser.expr();
 
 	if add.is_err() {
-		add.as_ref().unwrap_err().hints[0].underline_tokens(&stream, Color::Red);
-
+		add.as_mut().unwrap_err().show(&parser.stream);
+		
 		return;
 	}
 
